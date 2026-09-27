@@ -2249,6 +2249,39 @@ def get_session_x_range(df):
 # ---------------- UI (four tabs: Scanner, Key Levels, Chart, Alerts) ----------------
 st.set_page_config(page_title="Dr Yarapu Reddy Levels", layout="wide")
 
+# --- Password gate: blocks the whole app until the right password is
+# entered, since Streamlit Cloud's own "restrict viewers" setting is
+# capped at one app per account and can't be relied on here. The
+# password lives in Streamlit secrets (APP_PASSWORD), never in this
+# file. Once entered correctly, session_state remembers it for the
+# rest of this browser session -- no need to re-enter on every rerun. ---
+def _check_password():
+    def _password_entered():
+        _correct = None
+        try:
+            _correct = st.secrets.get("APP_PASSWORD")
+        except Exception:
+            _correct = None
+        if _correct and st.session_state.get("_pw_input") == _correct:
+            st.session_state["_pw_ok"] = True
+            del st.session_state["_pw_input"]
+        else:
+            st.session_state["_pw_ok"] = False
+
+    if st.session_state.get("_pw_ok"):
+        return True
+
+    st.text_input(
+        "Password", type="password", key="_pw_input", on_change=_password_entered,
+    )
+    if st.session_state.get("_pw_ok") is False:
+        st.error("Incorrect password.")
+    return False
+
+
+if not _check_password():
+    st.stop()
+
 # Disable Streamlit's default full-page dim/fade effect during reruns.
 # This app reruns often (multiple auto-refresh timers across tabs, all
 # firing on the same underlying script rerun regardless of which tab is
