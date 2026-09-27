@@ -2257,6 +2257,9 @@ st.set_page_config(page_title="Dr Yarapu Reddy Levels", layout="wide")
 # rest of this browser session -- no need to re-enter on every rerun. ---
 def _check_password():
     st.write("DEBUG APP_PASSWORD =", repr(st.secrets.get("APP_PASSWORD")))
+    st.write("DEBUG session_state _pw_input =", repr(st.session_state.get("_pw_input")))
+    st.write("DEBUG session_state _pw_ok =", repr(st.session_state.get("_pw_ok")))
+    st.write("DEBUG match? =", st.session_state.get("_pw_input") == st.secrets.get("APP_PASSWORD"))
     def _password_entered():
         _correct = None
         try:
