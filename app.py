@@ -2260,13 +2260,23 @@ def _check_password():
     st.write("DEBUG session_state _pw_input =", repr(st.session_state.get("_pw_input")))
     st.write("DEBUG session_state _pw_ok =", repr(st.session_state.get("_pw_ok")))
     st.write("DEBUG match? =", st.session_state.get("_pw_input") == st.secrets.get("APP_PASSWORD"))
+    for _line in st.session_state.get("_pw_debug_log", []):
+        st.write("DEBUG attempt:", _line)
     def _password_entered():
         _correct = None
         try:
             _correct = st.secrets.get("APP_PASSWORD")
         except Exception:
             _correct = None
-        if _correct and st.session_state.get("_pw_input") == _correct:
+        _typed = st.session_state.get("_pw_input")
+        _matched = bool(_correct) and _typed == _correct
+        _log = st.session_state.setdefault("_pw_debug_log", [])
+        _log.append(
+            f"typed={_typed!r} (len={len(_typed) if _typed is not None else 'N/A'}) "
+            f"correct={_correct!r} (len={len(_correct) if _correct is not None else 'N/A'}) "
+            f"matched={_matched}"
+        )
+        if _matched:
             st.session_state["_pw_ok"] = True
             del st.session_state["_pw_input"]
         else:
