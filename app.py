@@ -2256,29 +2256,14 @@ st.set_page_config(page_title="Dr Yarapu Reddy Levels", layout="wide")
 # file. Once entered correctly, session_state remembers it for the
 # rest of this browser session -- no need to re-enter on every rerun. ---
 def _check_password():
-    st.write("DEBUG APP_PASSWORD =", repr(st.secrets.get("APP_PASSWORD")))
-    st.write("DEBUG session_state _pw_input =", repr(st.session_state.get("_pw_input")))
-    st.write("DEBUG session_state _pw_ok =", repr(st.session_state.get("_pw_ok")))
-    st.write("DEBUG match? =", st.session_state.get("_pw_input") == st.secrets.get("APP_PASSWORD"))
-    for _line in st.session_state.get("_pw_debug_log", []):
-        st.write("DEBUG attempt:", _line)
     def _password_entered():
         _correct = None
         try:
             _correct = st.secrets.get("APP_PASSWORD")
         except Exception:
             _correct = None
-        _typed = st.session_state.get("_pw_input")
-        _matched = bool(_correct) and _typed == _correct
-        _log = st.session_state.setdefault("_pw_debug_log", [])
-        _log.append(
-            f"typed={_typed!r} (len={len(_typed) if _typed is not None else 'N/A'}) "
-            f"correct={_correct!r} (len={len(_correct) if _correct is not None else 'N/A'}) "
-            f"matched={_matched}"
-        )
-        if _matched:
+        if _correct and st.session_state.get("_pw_input") == _correct:
             st.session_state["_pw_ok"] = True
-            del st.session_state["_pw_input"]
         else:
             st.session_state["_pw_ok"] = False
 
@@ -2291,7 +2276,6 @@ def _check_password():
     if st.session_state.get("_pw_ok") is False:
         st.error("Incorrect password.")
     return False
-
 
 if not _check_password():
     st.stop()
