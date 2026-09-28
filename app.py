@@ -988,51 +988,90 @@ def get_today_candles_for_interval(symbol, instrument_key, token, unit, interval
     return fetch_today_candles_interval_cached(instrument_key, token, unit, interval)
 
 
-def run_precompute(token, progress_callback=None):
-    cache = {}
-    all_symbols = [(s, "futures") for s in FUTURES_SYMBOLS] + [(s, "equity") for s in EQUITY_SYMBOLS]
-    for i, (symbol, kind) in enumerate(all_symbols):
+def run_precompute(token, progress_callback=None, max_workers=16):
+    """Parallelized like run_zone_refresh (see that function's docstring
+    for the full reasoning -- bounded worker count, I/O-bound workload).
+    Precompute does more per symbol than Refresh Zones (two candle
+    fetches -- daily baseline + 18-day intraday -- plus the zone-
+    segmentation math), so each symbol costs more, but it's still
+    dominated by network wait, so concurrency still pays off: 229
+    symbols that used to take several minutes sequentially should now
+    take well under a minute.
+
+    resolve_equity_instrument_key/resolve_futures_instrument_key each
+    lazily download+cache Upstox's instrument master into a module-level
+    global on first call. That first call is made ONCE here, serially,
+    before the thread pool starts, so 16 threads don't all race to
+    download/parse that same multi-MB file at once on a cold cache."""
+    global _EQUITY_MASTER_MAP, _FUTURES_MASTER_MAP
+    if _EQUITY_MASTER_MAP is None:
         try:
-            key, lot_size = (resolve_equity_instrument_key(symbol, token) if kind == "equity"
-                              else resolve_futures_instrument_key(symbol, token))
-            if key is None:
-                continue
-            daily_df = fetch_candles(key, token, "days", "1", DAILY_LOOKBACK_DAYS)
-            intraday_df = fetch_candles(key, token, "minutes", "5", COMPOSITE_LOOKBACK_DAYS)
+            _EQUITY_MASTER_MAP = _load_equity_master_map()
+        except Exception:
+            _EQUITY_MASTER_MAP = {}
+    if _FUTURES_MASTER_MAP is None:
+        try:
+            _FUTURES_MASTER_MAP = _load_futures_master_map()
+        except Exception:
+            _FUTURES_MASTER_MAP = {}
 
-            prev_close = float(daily_df["close"].iloc[-1]) if not daily_df.empty else None
-            # Upstox's daily candle API can lag a day behind (may not
-            # include today's candle even after market close), while
-            # the intraday API doesn't have that lag -- fall back to
-            # today's last intraday close so Precompute run this
-            # evening reflects TODAY's actual close, not yesterday's.
-            if not intraday_df.empty:
-                _intraday_last_date = intraday_df["timestamp"].iloc[-1].date()
-                _daily_last_date = daily_df["timestamp"].iloc[-1].date() if not daily_df.empty else None
-                if _daily_last_date is None or _intraday_last_date > _daily_last_date:
-                    prev_close = float(intraday_df["close"].iloc[-1])
-            avg_daily_volume = (float(daily_df["volume"].tail(RVOL_BASELINE_DAYS).mean())
-                                 if len(daily_df) >= RVOL_BASELINE_DAYS else None)
-            composite_zones = compute_composite_zones(intraday_df)
-            intraday_zones = compute_intraday_zones(intraday_df)  # seed with today's slice of what we already have
-            ema_200 = compute_ema_200(intraday_df["close"].tolist()) if not intraday_df.empty else None
+    all_symbols = [(s, "futures") for s in FUTURES_SYMBOLS] + [(s, "equity") for s in EQUITY_SYMBOLS]
 
-            cache[symbol] = {
-                "instrument_key": key,
-                "lot_size": lot_size,
-                "prev_close": prev_close,
-                "avg_daily_volume": avg_daily_volume,
-                "composite_zones": composite_zones,
-                "intraday_zones": intraday_zones,
-                "ema_200": ema_200,
-                "last_signal": "-",
-                "zones_updated_at": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        except Exception as e:
-            st.warning(f"{symbol}: precompute failed ({e}), skipping.")
-        if progress_callback:
-            progress_callback(i + 1, len(all_symbols), symbol)
-        time.sleep(0.15)
+    def _precompute_one(symbol, kind):
+        key, lot_size = (resolve_equity_instrument_key(symbol, token) if kind == "equity"
+                          else resolve_futures_instrument_key(symbol, token))
+        if key is None:
+            return None
+        daily_df = fetch_candles(key, token, "days", "1", DAILY_LOOKBACK_DAYS)
+        intraday_df = fetch_candles(key, token, "minutes", "5", COMPOSITE_LOOKBACK_DAYS)
+
+        prev_close = float(daily_df["close"].iloc[-1]) if not daily_df.empty else None
+        # Upstox's daily candle API can lag a day behind (may not
+        # include today's candle even after market close), while
+        # the intraday API doesn't have that lag -- fall back to
+        # today's last intraday close so Precompute run this
+        # evening reflects TODAY's actual close, not yesterday's.
+        if not intraday_df.empty:
+            _intraday_last_date = intraday_df["timestamp"].iloc[-1].date()
+            _daily_last_date = daily_df["timestamp"].iloc[-1].date() if not daily_df.empty else None
+            if _daily_last_date is None or _intraday_last_date > _daily_last_date:
+                prev_close = float(intraday_df["close"].iloc[-1])
+        avg_daily_volume = (float(daily_df["volume"].tail(RVOL_BASELINE_DAYS).mean())
+                             if len(daily_df) >= RVOL_BASELINE_DAYS else None)
+        composite_zones = compute_composite_zones(intraday_df)
+        intraday_zones = compute_intraday_zones(intraday_df)  # seed with today's slice of what we already have
+        ema_200 = compute_ema_200(intraday_df["close"].tolist()) if not intraday_df.empty else None
+
+        return {
+            "instrument_key": key,
+            "lot_size": lot_size,
+            "prev_close": prev_close,
+            "avg_daily_volume": avg_daily_volume,
+            "composite_zones": composite_zones,
+            "intraday_zones": intraday_zones,
+            "ema_200": ema_200,
+            "last_signal": "-",
+            "zones_updated_at": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    cache = {}
+    completed = 0
+    progress_lock = threading.Lock()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_symbol = {pool.submit(_precompute_one, s, k): s for s, k in all_symbols}
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                result = future.result()
+                if result is not None:
+                    cache[symbol] = result
+            except Exception as e:
+                st.warning(f"{symbol}: precompute failed ({e}), skipping.")
+            with progress_lock:
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, len(all_symbols), symbol)
 
     with open(CACHE_PATH, "w") as f:
         json.dump(cache, f)
