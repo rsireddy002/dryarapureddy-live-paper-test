@@ -529,18 +529,38 @@ def _get_with_backoff(url, headers=None, params=None, timeout=20, max_retries=5,
     last_exc = None
     resp = None
     for attempt in range(max_retries):
+        _t0 = time.time()
         try:
             resp = requests.get(url, headers=headers, params=params, timeout=timeout)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            _elapsed = time.time() - _t0
+            # DIAGNOSTIC (temporary): pin down what "stuck" actually looks
+            # like server-side -- a hard timeout (elapsed ~= timeout param)
+            # points at Upstox not responding at all; a fast ConnectionError
+            # points at a dropped/refused connection instead. Goes to
+            # Streamlit Cloud's app logs (Manage app -> Logs), not the UI.
+            print(f"[backoff] {url.split('/')[-1] if '/' in url else url} "
+                  f"attempt {attempt+1}/{max_retries}: {type(e).__name__} "
+                  f"after {_elapsed:.1f}s (timeout param={timeout}s)")
             last_exc = e
             time.sleep(base_delay * (2 ** attempt))
             continue
+        _elapsed = time.time() - _t0
         if resp.status_code != 429:
+            if attempt > 0 or _elapsed > 5:
+                print(f"[backoff] {url.split('/')[-1] if '/' in url else url} "
+                      f"attempt {attempt+1}/{max_retries}: status={resp.status_code} "
+                      f"in {_elapsed:.1f}s")
             return resp
         retry_after = resp.headers.get("Retry-After")
         delay = float(retry_after) if retry_after else base_delay * (2 ** attempt)
+        print(f"[backoff] {url.split('/')[-1] if '/' in url else url} "
+              f"attempt {attempt+1}/{max_retries}: 429, waiting {delay:.1f}s "
+              f"(Retry-After={retry_after})")
         time.sleep(delay)
     if resp is None and last_exc is not None:
+        print(f"[backoff] {url.split('/')[-1] if '/' in url else url}: "
+              f"giving up after {max_retries} attempts, raising {type(last_exc).__name__}")
         raise last_exc
     return resp
 
@@ -992,13 +1012,20 @@ def run_precompute(token, progress_callback=None):
     cache = {}
     all_symbols = [(s, "futures") for s in FUTURES_SYMBOLS] + [(s, "equity") for s in EQUITY_SYMBOLS]
     for i, (symbol, kind) in enumerate(all_symbols):
+        _sym_t0 = time.time()  # DIAGNOSTIC (temporary): total per-symbol wall time
         try:
             key, lot_size = (resolve_equity_instrument_key(symbol, token) if kind == "equity"
                               else resolve_futures_instrument_key(symbol, token))
             if key is None:
                 continue
             daily_df = fetch_candles(key, token, "days", "1", DAILY_LOOKBACK_DAYS)
+            _after_daily = time.time()
+            if _after_daily - _sym_t0 > 5:
+                print(f"[precompute] {symbol}: daily candles took {_after_daily - _sym_t0:.1f}s")
             intraday_df = fetch_candles(key, token, "minutes", "5", COMPOSITE_LOOKBACK_DAYS)
+            _after_intraday = time.time()
+            if _after_intraday - _after_daily > 5:
+                print(f"[precompute] {symbol}: intraday candles took {_after_intraday - _after_daily:.1f}s")
 
             prev_close = float(daily_df["close"].iloc[-1]) if not daily_df.empty else None
             # Upstox's daily candle API can lag a day behind (may not
@@ -1030,6 +1057,13 @@ def run_precompute(token, progress_callback=None):
             }
         except Exception as e:
             st.warning(f"{symbol}: precompute failed ({e}), skipping.")
+        _sym_elapsed = time.time() - _sym_t0
+        if _sym_elapsed > 10:
+            # DIAGNOSTIC (temporary): flags exactly which symbol(s) are slow
+            # and by how much, so we can tell "genuinely stuck" apart from
+            # "just slower than the others" from the Streamlit Cloud logs.
+            print(f"[precompute] {symbol}: took {_sym_elapsed:.1f}s total "
+                  f"(i={i + 1}/{len(all_symbols)})")
         if progress_callback:
             progress_callback(i + 1, len(all_symbols), symbol)
         time.sleep(0.15)
