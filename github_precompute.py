@@ -46,6 +46,23 @@ def now_ist():
 # Constants (copied from app.py)
 # ---------------------------------------------------------------------------
 CACHE_PATH = "sahi_zones_cache.json"
+
+
+def _atomic_json_dump(path, obj):
+    """Write JSON to `path` without ever leaving a torn/corrupted file
+    behind -- writes to a temp file, then os.replace() (atomic on both
+    POSIX and Windows) swaps it into place in one step. Mirrors the same
+    fix applied to app.py: a plain 'with open(path, "w")' write left a
+    real corrupted sahi_zones_cache.json on disk once (most likely a
+    process restart mid-write), which then crashed the LIVE APP on every
+    page load trying to read it back. This script writes the exact same
+    file the live app reads, so it needs the same protection."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
 INSTRUMENT_SEARCH_URL = "https://api.upstox.com/v2/instruments/search"
 INSTRUMENT_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
 
@@ -338,8 +355,7 @@ def run_precompute(token):
             print(f"  [{i + 1}/{total}] {symbol}: precompute failed ({e}), skipping.")
         time.sleep(0.15)
 
-    with open(CACHE_PATH, "w") as f:
-        json.dump(cache, f)
+    _atomic_json_dump(CACHE_PATH, cache)
     print(f"\nPrecompute done. {len(cache)} symbols cached -> {CACHE_PATH}")
     return cache
 

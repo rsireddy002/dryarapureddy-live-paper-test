@@ -138,6 +138,44 @@ QUOTES_URL = "https://api.upstox.com/v2/market-quote/quotes"
 UPSTOX_AUTHORIZE_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 UPSTOX_TOKEN_URL = "https://api.upstox.com/v2/login/authorization/token"
 CACHE_PATH = "sahi_zones_cache.json"
+
+
+def _atomic_json_dump(path, obj):
+    """Write JSON to `path` without ever leaving a torn/corrupted file
+    behind. Writes to a temp file first, then os.replace() (atomic on
+    both POSIX and Windows) swaps it into place in one step -- so a
+    process kill or container restart mid-write (e.g. a Streamlit Cloud
+    redeploy triggered by a git push landing while a scan was still
+    writing this same file) can never leave a half-written file at
+    `path`. Root-caused a real outage: the plain 'with open(path, "w")'
+    pattern this replaces let exactly that happen once, corrupting
+    sahi_zones_cache.json and crashing the app on every single page load
+    afterwards (json.load() raising JSONDecodeError before the script
+    ever reached the dashboard)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def _safe_load_cache(path):
+    """Loads the zones cache, but never lets a corrupted file take the
+    whole app down. If the file is unreadable/malformed for any reason,
+    logs it (both to the UI and the app logs) and returns an empty cache
+    instead of crashing -- the user can then just re-run Precompute
+    rather than the app being permanently stuck until someone manually
+    fixes/deletes the file on disk."""
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[cache] {path} is corrupted or unreadable ({e}); "
+              f"starting with an empty cache -- re-run Precompute.")
+        st.error(f"{path} was corrupted on disk and couldn't be loaded "
+                 f"({e}). Starting fresh -- please click 'Run Precompute'.")
+        return {}
+
+
 ALERT_LOG_PATH = "alert_log.json"
 FNO_LIVE_CANDLES_PATH = os.environ.get("FNO_LIVE_CANDLES_PATH", "fno_live_candles.json")
 TRIPLE_CROSS_LOG_PATH = "triple_cross_log.json"  # written by tick_paper_trader.py, read-only here
@@ -1068,8 +1106,7 @@ def run_precompute(token, progress_callback=None):
             progress_callback(i + 1, len(all_symbols), symbol)
         time.sleep(0.15)
 
-    with open(CACHE_PATH, "w") as f:
-        json.dump(cache, f)
+    _atomic_json_dump(CACHE_PATH, cache)
     return cache
 
 
@@ -1121,8 +1158,7 @@ def run_zone_refresh(cache, token, progress_callback=None, max_workers=16):
                 if progress_callback:
                     progress_callback(completed, len(symbols), symbol)
 
-    with open(CACHE_PATH, "w") as f:
-        json.dump(cache, f)
+    _atomic_json_dump(CACHE_PATH, cache)
     return cache
 
 
@@ -2461,8 +2497,7 @@ if run_precompute_clicked:
     st.success(f"Precompute done. {len(cache)} symbols cached.")
 
 if os.path.exists(CACHE_PATH):
-    with open(CACHE_PATH, "r") as f:
-        cache = json.load(f)
+    cache = _safe_load_cache(CACHE_PATH)
 
     if refresh_zones_clicked or auto_zone_due:
         token = get_token()
@@ -2484,8 +2519,7 @@ if os.path.exists(CACHE_PATH):
         alert_log = update_alert_log(alert_log, signals, top_n_symbols)
         save_alert_log(alert_log)
 
-        with open(CACHE_PATH, "w") as f:
-            json.dump(cache, f)
+        _atomic_json_dump(CACHE_PATH, cache)
 
         st.session_state["last_scan_df"] = scan_df
         st.session_state["last_refresh_time"] = now_ist().strftime("%H:%M:%S")
