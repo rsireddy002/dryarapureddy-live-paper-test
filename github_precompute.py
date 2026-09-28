@@ -27,6 +27,7 @@ import io
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
@@ -295,48 +296,108 @@ def compute_intraday_zones(today_only_df):
 # ---------------------------------------------------------------------------
 # Main precompute loop (mirrors app.py's run_precompute, no Streamlit)
 # ---------------------------------------------------------------------------
+PRECOMPUTE_SYMBOL_TIMEOUT_SECONDS = 45  # a single symbol's two candle
+# fetches + backoff retries + zone math should never legitimately take
+# longer than this -- if it does, something is genuinely stuck (a hung
+# connection, a pathological retry loop, whatever) and we give up on
+# THAT symbol rather than let it freeze the whole run.
+
+
 def run_precompute(token):
-    cache = {}
+    """Reverted to sequential (one symbol at a time) after parallelizing
+    this at 16 and then 8 workers both still produced runs that appeared
+    to hang -- concurrency wasn't the actual cause, since the plain
+    sequential version can get stuck on a single symbol too. Each
+    request already has its own timeout/backoff (_get_with_backoff), but
+    nothing previously bounded the TOTAL time spent on one symbol across
+    both its candle fetches plus zone computation, so a symbol hitting
+    repeated connection-level retries (or any other unexpectedly slow
+    path) could stall the whole loop indefinitely.
+
+    Fix: each symbol now runs in its own single-worker thread with a
+    hard wall-clock timeout (PRECOMPUTE_SYMBOL_TIMEOUT_SECONDS). If a
+    symbol doesn't finish in time, it's logged and skipped immediately --
+    the abandoned thread is left to finish (or not) in the background and
+    is cleaned up harmlessly when it eventually completes or the process
+    exits. This bounds the run's worst case (229 * 45s at most, even if
+    every symbol somehow stalled) instead of leaving it unbounded.
+
+    The instrument-key resolvers lazily download+cache Upstox's
+    instrument master into a module-level global on first call -- that
+    first call is made ONCE here, serially, up front, so it isn't
+    repeated per symbol."""
+    global _EQUITY_MASTER_MAP, _FUTURES_MASTER_MAP
+    if _EQUITY_MASTER_MAP is None:
+        try:
+            _EQUITY_MASTER_MAP = _load_equity_master_map()
+        except Exception:
+            _EQUITY_MASTER_MAP = {}
+    if _FUTURES_MASTER_MAP is None:
+        try:
+            _FUTURES_MASTER_MAP = _load_futures_master_map()
+        except Exception:
+            _FUTURES_MASTER_MAP = {}
+
     all_symbols = [(s, "futures") for s in FUTURES_SYMBOLS] + [(s, "equity") for s in EQUITY_SYMBOLS]
     total = len(all_symbols)
+
+    def _precompute_one(symbol, kind):
+        key, lot_size = (resolve_equity_instrument_key(symbol, token) if kind == "equity"
+                          else resolve_futures_instrument_key(symbol, token))
+        if key is None:
+            return None, None
+        daily_df = fetch_candles(key, token, "days", "1", DAILY_LOOKBACK_DAYS)
+        intraday_df = fetch_candles(key, token, "minutes", "5", COMPOSITE_LOOKBACK_DAYS)
+
+        prev_close = float(daily_df["close"].iloc[-1]) if not daily_df.empty else None
+        if not intraday_df.empty:
+            intraday_last_date = intraday_df["timestamp"].iloc[-1].date()
+            daily_last_date = daily_df["timestamp"].iloc[-1].date() if not daily_df.empty else None
+            if daily_last_date is None or intraday_last_date > daily_last_date:
+                prev_close = float(intraday_df["close"].iloc[-1])
+
+        avg_daily_volume = (float(daily_df["volume"].tail(RVOL_BASELINE_DAYS).mean())
+                             if len(daily_df) >= RVOL_BASELINE_DAYS else None)
+        composite_zones = compute_composite_zones(intraday_df)
+        intraday_zones = compute_intraday_zones(intraday_df)
+        ema_200 = compute_ema_200(intraday_df["close"].tolist()) if not intraday_df.empty else None
+
+        return prev_close, {
+            "instrument_key": key,
+            "lot_size": lot_size,
+            "prev_close": prev_close,
+            "avg_daily_volume": avg_daily_volume,
+            "composite_zones": composite_zones,
+            "intraday_zones": intraday_zones,
+            "ema_200": ema_200,
+            "last_signal": "-",
+            "zones_updated_at": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    cache = {}
     for i, (symbol, kind) in enumerate(all_symbols):
+        completed = i + 1
+        # A fresh one-worker pool per symbol, NOT used as a context manager --
+        # "with ThreadPoolExecutor(...) as pool:" would block on __exit__
+        # until the submitted task finishes, which defeats the timeout below.
+        # shutdown(wait=False) lets us walk away from a still-running task.
+        pool = ThreadPoolExecutor(max_workers=1)
         try:
-            key, lot_size = (resolve_equity_instrument_key(symbol, token) if kind == "equity"
-                              else resolve_futures_instrument_key(symbol, token))
-            if key is None:
-                print(f"  [{i + 1}/{total}] {symbol}: could not resolve instrument key, skipping.")
-                continue
-            daily_df = fetch_candles(key, token, "days", "1", DAILY_LOOKBACK_DAYS)
-            intraday_df = fetch_candles(key, token, "minutes", "5", COMPOSITE_LOOKBACK_DAYS)
-
-            prev_close = float(daily_df["close"].iloc[-1]) if not daily_df.empty else None
-            if not intraday_df.empty:
-                intraday_last_date = intraday_df["timestamp"].iloc[-1].date()
-                daily_last_date = daily_df["timestamp"].iloc[-1].date() if not daily_df.empty else None
-                if daily_last_date is None or intraday_last_date > daily_last_date:
-                    prev_close = float(intraday_df["close"].iloc[-1])
-
-            avg_daily_volume = (float(daily_df["volume"].tail(RVOL_BASELINE_DAYS).mean())
-                                 if len(daily_df) >= RVOL_BASELINE_DAYS else None)
-            composite_zones = compute_composite_zones(intraday_df)
-            intraday_zones = compute_intraday_zones(intraday_df)
-            ema_200 = compute_ema_200(intraday_df["close"].tolist()) if not intraday_df.empty else None
-
-            cache[symbol] = {
-                "instrument_key": key,
-                "lot_size": lot_size,
-                "prev_close": prev_close,
-                "avg_daily_volume": avg_daily_volume,
-                "composite_zones": composite_zones,
-                "intraday_zones": intraday_zones,
-                "ema_200": ema_200,
-                "last_signal": "-",
-                "zones_updated_at": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            print(f"  [{i + 1}/{total}] {symbol}: ok (prev_close={prev_close})")
-        except Exception as e:
-            print(f"  [{i + 1}/{total}] {symbol}: precompute failed ({e}), skipping.")
-        time.sleep(0.15)
+            future = pool.submit(_precompute_one, symbol, kind)
+            try:
+                prev_close, entry = future.result(timeout=PRECOMPUTE_SYMBOL_TIMEOUT_SECONDS)
+                if entry is None:
+                    print(f"  [{completed}/{total}] {symbol}: could not resolve instrument key, skipping.")
+                else:
+                    cache[symbol] = entry
+                    print(f"  [{completed}/{total}] {symbol}: ok (prev_close={prev_close})")
+            except FuturesTimeoutError:
+                print(f"  [{completed}/{total}] {symbol}: precompute timed out after "
+                      f"{PRECOMPUTE_SYMBOL_TIMEOUT_SECONDS}s, skipping.")
+            except Exception as e:
+                print(f"  [{completed}/{total}] {symbol}: precompute failed ({e}), skipping.")
+        finally:
+            pool.shutdown(wait=False)
 
     with open(CACHE_PATH, "w") as f:
         json.dump(cache, f)
