@@ -189,10 +189,17 @@ def plot_candles_with_zones(df, composite_zones=None, intraday_zones=None,
     for z in intraday_zones:
         if _zone_key(z) in composite_keys:
             continue  # already covered by the composite/validated treatment below
-        fig.add_shape(
-            type="line", x0=x0, x1=x1, y0=z["price_mode"], y1=z["price_mode"],
-            line=dict(color=REFERENCE_LINE, width=1, dash="dot"),
-        )
+        try:
+            zone_price = float(z["price_mode"])
+        except (TypeError, ValueError):
+            continue
+        try:
+            fig.add_shape(
+                type="line", x0=x0, x1=x1, y0=zone_price, y1=zone_price,
+                line=dict(color=REFERENCE_LINE, width=1, dash="dot"),
+            )
+        except Exception:
+            continue
 
     # Composite zones -- known before the session starts, so these get
     # full support/resistance treatment from the very first candle.
@@ -218,66 +225,92 @@ def plot_candles_with_zones(df, composite_zones=None, intraday_zones=None,
         _zones_by_key.setdefault(_zone_key(z), z)
     zones_to_draw = sorted(_zones_by_key.values(), key=lambda z: z["price_mode"], reverse=True)
     for z in zones_to_draw:
-        is_resistance = z["price_mode"] >= last_close
-        is_validated = _zone_key(z) in validated_keys
+        try:
+            # Defensively coerce every numeric field to a plain Python
+            # float up front. When one of these values arrives as a
+            # numpy scalar, a 1-element array, or a pandas Series (this
+            # has happened for at least BANKINDIA and FORTIS), a
+            # comparison like `label_y != price_mode` stops returning a
+            # plain bool and instead returns an array -- and Plotly's
+            # `showarrow` validator then raises ValueError trying to
+            # coerce that array to a bool, which crashed the WHOLE
+            # chart over a single bad zone. Casting here makes every
+            # downstream operation work on plain scalars again.
+            price_mode = float(z["price_mode"])
+            price_low = float(z["price_low"])
+            price_high = float(z["price_high"])
+        except (TypeError, ValueError):
+            # Unusable price data on this one zone -- skip just this
+            # zone instead of taking down the whole chart.
+            continue
 
-        if is_validated:
-            fill = VALIDATED_RESISTANCE_FILL if is_resistance else VALIDATED_SUPPORT_FILL
-            line_width = line_width_validated
-            kind_label = "Resistance (confirmed)" if is_resistance else "Support (confirmed)"
-        else:
-            fill = RESISTANCE_FILL if is_resistance else SUPPORT_FILL
-            line_width = line_width_base
-            kind_label = "Resistance" if is_resistance else "Support"
-        line_color = RESISTANCE_LINE if is_resistance else SUPPORT_LINE
+        try:
+            is_resistance = price_mode >= last_close
+            is_validated = _zone_key(z) in validated_keys
 
-        fig.add_hrect(
-            y0=z["price_low"], y1=z["price_high"],
-            fillcolor=fill, line_width=0, layer="below",
-        )
-        fig.add_shape(
-            type="line", x0=x0, x1=x1, y0=z["price_mode"], y1=z["price_mode"],
-            line=dict(color=line_color, width=line_width, dash="dash"),
-        )
+            if is_validated:
+                fill = VALIDATED_RESISTANCE_FILL if is_resistance else VALIDATED_SUPPORT_FILL
+                line_width = line_width_validated
+                kind_label = "Resistance (confirmed)" if is_resistance else "Support (confirmed)"
+            else:
+                fill = RESISTANCE_FILL if is_resistance else SUPPORT_FILL
+                line_width = line_width_base
+                kind_label = "Resistance" if is_resistance else "Support"
+            line_color = RESISTANCE_LINE if is_resistance else SUPPORT_LINE
 
-        ml_risk = (ml_risk_lookup or {}).get(_zone_key(z))
-        ml_suffix = f" - ML {ml_risk:.0f}%" if ml_risk is not None else ""
-
-        if not compact:
-            label_y = z["price_mode"]
-            for py in placed_y:
-                if abs(label_y - py) < min_gap:
-                    label_y = py - min_gap
-            placed_y.append(label_y)
-
-            fig.add_annotation(
-                x=x1, y=label_y,
-                text=f"{kind_label} {z['price_mode']:.0f} ({_pct_from_label(z['label']):.0f}%){ml_suffix}",
-                showarrow=(label_y != z["price_mode"]),
-                arrowhead=0, arrowwidth=1, arrowcolor=line_color,
-                ax=45, ay=0,
-                xanchor="left", font=dict(size=label_font_size, color=line_color,
-                                           family="Arial Black" if is_validated else "Arial"),
-                bgcolor="rgba(19, 23, 34, 0.9)",
-                bordercolor=line_color, borderwidth=2 if is_validated else 1, borderpad=3,
+            fig.add_hrect(
+                y0=price_low, y1=price_high,
+                fillcolor=fill, line_width=0, layer="below",
             )
-        else:
-            # Compact grid cells: a tiny price tag instead of the full
-            # label+percent annotation, which would overwhelm a small chart.
-            # ML risk still gets appended (short form) when available --
-            # this is exactly the "visible on every sector chart" case.
-            # xanchor="right" makes the box END at x1 and grow LEFTWARD
-            # into the visible chart, instead of growing rightward past
-            # the chart edge into the (too-narrow-for-this-text) margin.
-            compact_ml = f" ML{ml_risk:.0f}%" if ml_risk is not None else ""
-            fig.add_annotation(
-                x=x1, y=z["price_mode"],
-                text=f"{z['price_mode']:.0f}{compact_ml}",
-                showarrow=False, xanchor="right",
-                font=dict(size=label_font_size, color=line_color),
-                bgcolor="rgba(19, 23, 34, 0.85)",
-                bordercolor=line_color, borderwidth=1 if is_validated else 0, borderpad=1,
+            fig.add_shape(
+                type="line", x0=x0, x1=x1, y0=price_mode, y1=price_mode,
+                line=dict(color=line_color, width=line_width, dash="dash"),
             )
+
+            ml_risk = (ml_risk_lookup or {}).get(_zone_key(z))
+            ml_risk = float(ml_risk) if ml_risk is not None else None
+            ml_suffix = f" - ML {ml_risk:.0f}%" if ml_risk is not None else ""
+
+            if not compact:
+                label_y = price_mode
+                for py in placed_y:
+                    if abs(label_y - py) < min_gap:
+                        label_y = py - min_gap
+                placed_y.append(label_y)
+
+                fig.add_annotation(
+                    x=x1, y=label_y,
+                    text=f"{kind_label} {price_mode:.0f} ({_pct_from_label(z['label']):.0f}%){ml_suffix}",
+                    showarrow=bool(label_y != price_mode),
+                    arrowhead=0, arrowwidth=1, arrowcolor=line_color,
+                    ax=45, ay=0,
+                    xanchor="left", font=dict(size=label_font_size, color=line_color,
+                                               family="Arial Black" if is_validated else "Arial"),
+                    bgcolor="rgba(19, 23, 34, 0.9)",
+                    bordercolor=line_color, borderwidth=2 if is_validated else 1, borderpad=3,
+                )
+            else:
+                # Compact grid cells: a tiny price tag instead of the full
+                # label+percent annotation, which would overwhelm a small chart.
+                # ML risk still gets appended (short form) when available --
+                # this is exactly the "visible on every sector chart" case.
+                # xanchor="right" makes the box END at x1 and grow LEFTWARD
+                # into the visible chart, instead of growing rightward past
+                # the chart edge into the (too-narrow-for-this-text) margin.
+                compact_ml = f" ML{ml_risk:.0f}%" if ml_risk is not None else ""
+                fig.add_annotation(
+                    x=x1, y=price_mode,
+                    text=f"{price_mode:.0f}{compact_ml}",
+                    showarrow=False, xanchor="right",
+                    font=dict(size=label_font_size, color=line_color),
+                    bgcolor="rgba(19, 23, 34, 0.85)",
+                    bordercolor=line_color, borderwidth=1 if is_validated else 0, borderpad=1,
+                )
+        except Exception:
+            # One malformed zone should never take down the whole chart --
+            # skip just this zone's shape/annotation; every other zone
+            # still renders normally.
+            continue
 
     # marker for last close so it's obvious where "current price" sits
     fig.add_shape(
@@ -405,23 +438,34 @@ def build_synced_sector_grid(symbol_panels, cols=2, height_per_row=260):
         ), row=row, col=col)
 
         for z in (panel.get("validated_zones") or []):
-            is_resistance = z["price_mode"] >= last_close
-            fill = VALIDATED_RESISTANCE_FILL if is_resistance else VALIDATED_SUPPORT_FILL
-            line_color = RESISTANCE_LINE if is_resistance else SUPPORT_LINE
+            try:
+                z_price_mode = float(z["price_mode"])
+                z_price_low = float(z["price_low"])
+                z_price_high = float(z["price_high"])
+            except (TypeError, ValueError):
+                continue
 
-            fig.add_hrect(y0=z["price_low"], y1=z["price_high"], fillcolor=fill,
-                          line_width=0, layer="below", row=row, col=col)
-            fig.add_shape(type="line", x0=x0, x1=x1, y0=z["price_mode"], y1=z["price_mode"],
-                          line=dict(color=line_color, width=1.8, dash="dash"), row=row, col=col)
+            try:
+                is_resistance = z_price_mode >= last_close
+                fill = VALIDATED_RESISTANCE_FILL if is_resistance else VALIDATED_SUPPORT_FILL
+                line_color = RESISTANCE_LINE if is_resistance else SUPPORT_LINE
 
-            ml_risk = ml_lookup.get(round(z["price_mode"], 2))
-            ml_suffix = f" ML{ml_risk:.0f}%" if ml_risk is not None else ""
-            fig.add_annotation(
-                x=x1, y=z["price_mode"], text=f"{z['price_mode']:.0f}{ml_suffix}",
-                showarrow=False, xanchor="right", font=dict(size=10, color=line_color),
-                bgcolor="rgba(19, 23, 34, 0.85)", bordercolor=line_color, borderwidth=1, borderpad=1,
-                row=row, col=col,
-            )
+                fig.add_hrect(y0=z_price_low, y1=z_price_high, fillcolor=fill,
+                              line_width=0, layer="below", row=row, col=col)
+                fig.add_shape(type="line", x0=x0, x1=x1, y0=z_price_mode, y1=z_price_mode,
+                              line=dict(color=line_color, width=1.8, dash="dash"), row=row, col=col)
+
+                ml_risk = ml_lookup.get(round(z_price_mode, 2))
+                ml_risk = float(ml_risk) if ml_risk is not None else None
+                ml_suffix = f" ML{ml_risk:.0f}%" if ml_risk is not None else ""
+                fig.add_annotation(
+                    x=x1, y=z_price_mode, text=f"{z_price_mode:.0f}{ml_suffix}",
+                    showarrow=False, xanchor="right", font=dict(size=10, color=line_color),
+                    bgcolor="rgba(19, 23, 34, 0.85)", bordercolor=line_color, borderwidth=1, borderpad=1,
+                    row=row, col=col,
+                )
+            except Exception:
+                continue
 
         fig.add_shape(type="line", x0=x0, x1=x1, y0=last_close, y1=last_close,
                       line=dict(color=LTP_LINE, width=1, dash="solid"), row=row, col=col)
