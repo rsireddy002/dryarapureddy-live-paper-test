@@ -1,0 +1,31 @@
+name: Premarket scan
+
+on:
+  schedule:
+    # 04:03 UTC = 9:33 AM IST, weekdays -- a few minutes after market open
+    # so 3-6 candles exist (avoids the noisy single-candle signal), and a
+    # few minutes off the exact hour to avoid GitHub Actions' :00 traffic.
+    - cron: "3 4 * * 1-5"
+  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pandas numpy
+
+      - name: Run premarket scan
+        env:
+          UPSTOX_ANALYTICAL_TOKEN: ${{ secrets.UPSTOX_ANALYTICAL_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python github_premarket_scan.py
