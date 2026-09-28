@@ -26,9 +26,7 @@ import gzip
 import io
 import json
 import os
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
@@ -297,89 +295,48 @@ def compute_intraday_zones(today_only_df):
 # ---------------------------------------------------------------------------
 # Main precompute loop (mirrors app.py's run_precompute, no Streamlit)
 # ---------------------------------------------------------------------------
-def run_precompute(token, max_workers=8):
-    """Parallelized -- see app.py's run_precompute docstring for the full
-    reasoning (bounded worker pool, I/O-bound workload). Kept at 8
-    workers rather than Refresh Zones' 16 -- Precompute makes TWO API
-    calls per symbol (daily baseline + 18-day intraday) versus Refresh
-    Zones' one, so 8 workers here puts roughly the same request rate on
-    Upstox's historical-candle endpoint as 16 workers does for Refresh
-    Zones. Running this at 16 was intermittently getting rate-limited
-    (429s), which stalls the whole run in exponential backoff even
-    though it's not actually broken -- just makes it LOOK stuck.
-
-    The instrument-key resolvers lazily download+cache Upstox's
-    instrument master into a module-level global on first call -- that
-    first call is made ONCE here, serially, before the thread pool
-    starts, so those threads don't all race to download/parse that same
-    multi-MB file at once on a cold cache."""
-    global _EQUITY_MASTER_MAP, _FUTURES_MASTER_MAP
-    if _EQUITY_MASTER_MAP is None:
-        try:
-            _EQUITY_MASTER_MAP = _load_equity_master_map()
-        except Exception:
-            _EQUITY_MASTER_MAP = {}
-    if _FUTURES_MASTER_MAP is None:
-        try:
-            _FUTURES_MASTER_MAP = _load_futures_master_map()
-        except Exception:
-            _FUTURES_MASTER_MAP = {}
-
+def run_precompute(token):
+    cache = {}
     all_symbols = [(s, "futures") for s in FUTURES_SYMBOLS] + [(s, "equity") for s in EQUITY_SYMBOLS]
     total = len(all_symbols)
+    for i, (symbol, kind) in enumerate(all_symbols):
+        try:
+            key, lot_size = (resolve_equity_instrument_key(symbol, token) if kind == "equity"
+                              else resolve_futures_instrument_key(symbol, token))
+            if key is None:
+                print(f"  [{i + 1}/{total}] {symbol}: could not resolve instrument key, skipping.")
+                continue
+            daily_df = fetch_candles(key, token, "days", "1", DAILY_LOOKBACK_DAYS)
+            intraday_df = fetch_candles(key, token, "minutes", "5", COMPOSITE_LOOKBACK_DAYS)
 
-    def _precompute_one(symbol, kind):
-        key, lot_size = (resolve_equity_instrument_key(symbol, token) if kind == "equity"
-                          else resolve_futures_instrument_key(symbol, token))
-        if key is None:
-            return None, None
-        daily_df = fetch_candles(key, token, "days", "1", DAILY_LOOKBACK_DAYS)
-        intraday_df = fetch_candles(key, token, "minutes", "5", COMPOSITE_LOOKBACK_DAYS)
+            prev_close = float(daily_df["close"].iloc[-1]) if not daily_df.empty else None
+            if not intraday_df.empty:
+                intraday_last_date = intraday_df["timestamp"].iloc[-1].date()
+                daily_last_date = daily_df["timestamp"].iloc[-1].date() if not daily_df.empty else None
+                if daily_last_date is None or intraday_last_date > daily_last_date:
+                    prev_close = float(intraday_df["close"].iloc[-1])
 
-        prev_close = float(daily_df["close"].iloc[-1]) if not daily_df.empty else None
-        if not intraday_df.empty:
-            intraday_last_date = intraday_df["timestamp"].iloc[-1].date()
-            daily_last_date = daily_df["timestamp"].iloc[-1].date() if not daily_df.empty else None
-            if daily_last_date is None or intraday_last_date > daily_last_date:
-                prev_close = float(intraday_df["close"].iloc[-1])
+            avg_daily_volume = (float(daily_df["volume"].tail(RVOL_BASELINE_DAYS).mean())
+                                 if len(daily_df) >= RVOL_BASELINE_DAYS else None)
+            composite_zones = compute_composite_zones(intraday_df)
+            intraday_zones = compute_intraday_zones(intraday_df)
+            ema_200 = compute_ema_200(intraday_df["close"].tolist()) if not intraday_df.empty else None
 
-        avg_daily_volume = (float(daily_df["volume"].tail(RVOL_BASELINE_DAYS).mean())
-                             if len(daily_df) >= RVOL_BASELINE_DAYS else None)
-        composite_zones = compute_composite_zones(intraday_df)
-        intraday_zones = compute_intraday_zones(intraday_df)
-        ema_200 = compute_ema_200(intraday_df["close"].tolist()) if not intraday_df.empty else None
-
-        return prev_close, {
-            "instrument_key": key,
-            "lot_size": lot_size,
-            "prev_close": prev_close,
-            "avg_daily_volume": avg_daily_volume,
-            "composite_zones": composite_zones,
-            "intraday_zones": intraday_zones,
-            "ema_200": ema_200,
-            "last_signal": "-",
-            "zones_updated_at": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-    cache = {}
-    completed = 0
-    print_lock = threading.Lock()
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_symbol = {pool.submit(_precompute_one, s, k): s for s, k in all_symbols}
-        for future in as_completed(future_to_symbol):
-            symbol = future_to_symbol[future]
-            with print_lock:
-                completed += 1
-                try:
-                    prev_close, entry = future.result()
-                    if entry is None:
-                        print(f"  [{completed}/{total}] {symbol}: could not resolve instrument key, skipping.")
-                    else:
-                        cache[symbol] = entry
-                        print(f"  [{completed}/{total}] {symbol}: ok (prev_close={prev_close})")
-                except Exception as e:
-                    print(f"  [{completed}/{total}] {symbol}: precompute failed ({e}), skipping.")
+            cache[symbol] = {
+                "instrument_key": key,
+                "lot_size": lot_size,
+                "prev_close": prev_close,
+                "avg_daily_volume": avg_daily_volume,
+                "composite_zones": composite_zones,
+                "intraday_zones": intraday_zones,
+                "ema_200": ema_200,
+                "last_signal": "-",
+                "zones_updated_at": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            print(f"  [{i + 1}/{total}] {symbol}: ok (prev_close={prev_close})")
+        except Exception as e:
+            print(f"  [{i + 1}/{total}] {symbol}: precompute failed ({e}), skipping.")
+        time.sleep(0.15)
 
     with open(CACHE_PATH, "w") as f:
         json.dump(cache, f)
