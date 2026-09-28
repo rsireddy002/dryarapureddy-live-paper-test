@@ -297,16 +297,21 @@ def compute_intraday_zones(today_only_df):
 # ---------------------------------------------------------------------------
 # Main precompute loop (mirrors app.py's run_precompute, no Streamlit)
 # ---------------------------------------------------------------------------
-def run_precompute(token, max_workers=16):
+def run_precompute(token, max_workers=8):
     """Parallelized -- see app.py's run_precompute docstring for the full
-    reasoning (bounded worker pool, I/O-bound workload). This used to
-    take several minutes running one symbol at a time; with 16 requests
-    in flight at once it should finish in well under a minute.
+    reasoning (bounded worker pool, I/O-bound workload). Kept at 8
+    workers rather than Refresh Zones' 16 -- Precompute makes TWO API
+    calls per symbol (daily baseline + 18-day intraday) versus Refresh
+    Zones' one, so 8 workers here puts roughly the same request rate on
+    Upstox's historical-candle endpoint as 16 workers does for Refresh
+    Zones. Running this at 16 was intermittently getting rate-limited
+    (429s), which stalls the whole run in exponential backoff even
+    though it's not actually broken -- just makes it LOOK stuck.
 
     The instrument-key resolvers lazily download+cache Upstox's
     instrument master into a module-level global on first call -- that
     first call is made ONCE here, serially, before the thread pool
-    starts, so 16 threads don't all race to download/parse that same
+    starts, so those threads don't all race to download/parse that same
     multi-MB file at once on a cold cache."""
     global _EQUITY_MASTER_MAP, _FUTURES_MASTER_MAP
     if _EQUITY_MASTER_MAP is None:

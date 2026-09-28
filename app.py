@@ -988,7 +988,7 @@ def get_today_candles_for_interval(symbol, instrument_key, token, unit, interval
     return fetch_today_candles_interval_cached(instrument_key, token, unit, interval)
 
 
-def run_precompute(token, progress_callback=None, max_workers=16):
+def run_precompute(token, progress_callback=None, max_workers=8):
     """Parallelized like run_zone_refresh (see that function's docstring
     for the full reasoning -- bounded worker count, I/O-bound workload).
     Precompute does more per symbol than Refresh Zones (two candle
@@ -1001,7 +1001,7 @@ def run_precompute(token, progress_callback=None, max_workers=16):
     resolve_equity_instrument_key/resolve_futures_instrument_key each
     lazily download+cache Upstox's instrument master into a module-level
     global on first call. That first call is made ONCE here, serially,
-    before the thread pool starts, so 16 threads don't all race to
+    before the thread pool starts, so those threads don't all race to
     download/parse that same multi-MB file at once on a cold cache."""
     global _EQUITY_MASTER_MAP, _FUTURES_MASTER_MAP
     if _EQUITY_MASTER_MAP is None:
