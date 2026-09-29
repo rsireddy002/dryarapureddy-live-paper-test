@@ -1,21 +1,17 @@
 name: Premarket scan
 
+permissions:
+  contents: read
+
 on:
   schedule:
-    # Every 5 minutes from market open to close, IST -> UTC (IST = UTC+5:30).
-    # Minutes offset by :02/:07/:12/:17/... instead of :00/:05/:10/... --
-    # GitHub Actions schedules queued at round clock marks get delayed or
-    # silently dropped under platform load far more often than off-beat
-    # minutes do.
-    #   09:17-09:27 IST = 03:47-03:57 UTC -- opening stretch
-    #   09:32-14:57 IST = 04:02-09:57 UTC -- every 5 min, full hours
-    #   15:32 IST = 10:02 UTC -- closing run
-    # GitHub Actions schedules are "best effort" -- under platform load a
-    # run can slip by a few minutes, so treat this as "roughly every 5
-    # min" rather than to-the-second.
-    - cron: "47,52,57 3 * * 1-5"
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 4-9 * * 1-5"
-    - cron: "2 10 * * 1-5"
+    # Every 5 minutes, offset 2 minutes off the round clock marks, covering
+    # market hours with margin: 03:00-10:59 UTC = 08:30-16:29 IST.
+    # Single plain cron line (no multiple entries, no comma lists) to match
+    # the exact style of scheduled-precompute.yml, which IS firing reliably
+    # on schedule in this same repo -- isolating whether the multi-entry
+    # cron structure used before was itself the problem.
+    - cron: "2-59/5 3-10 * * 1-5"
   workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
 
 jobs:
@@ -40,10 +36,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python github_premarket_scan.py
 
-      # Only runs if any step above this point failed -- pushes a short
-      # alert to the SAME Telegram chat so a silent/broken run doesn't
-      # just go unnoticed. Uses curl directly (no extra dependencies)
-      # since the Python script itself may not have even started.
       - name: Notify on failure
         if: failure()
         env:
