@@ -2,20 +2,20 @@ name: Premarket scan
 
 on:
   schedule:
-    # Every 15 minutes from market open to close, IST -> UTC (IST = UTC+5:30).
-    # Offset by :07/:22/:37/:52 instead of the round :00/:15/:30/:45 marks --
-    # GitHub Actions schedules queued at those popular round-clock times get
-    # delayed or silently dropped under platform load far more often than
-    # off-beat minutes do, which is what was causing scans to not fire.
-    #   09:22 IST = 03:52 UTC  -- one-off first run of the day
-    #   09:37-14:52 IST = 04:07-09:52 UTC -- every 15 min, full hours
-    #   15:37 IST = 10:07 UTC  -- closing run
+    # Every 5 minutes from market open to close, IST -> UTC (IST = UTC+5:30).
+    # Minutes offset by :02/:07/:12/:17/... instead of :00/:05/:10/... --
+    # GitHub Actions schedules queued at round clock marks get delayed or
+    # silently dropped under platform load far more often than off-beat
+    # minutes do.
+    #   09:17-09:27 IST = 03:47-03:57 UTC -- opening stretch
+    #   09:32-14:57 IST = 04:02-09:57 UTC -- every 5 min, full hours
+    #   15:32 IST = 10:02 UTC -- closing run
     # GitHub Actions schedules are "best effort" -- under platform load a
-    # run can slip by a few minutes, so treat this as "roughly every 15
+    # run can slip by a few minutes, so treat this as "roughly every 5
     # min" rather than to-the-second.
-    - cron: "52 3 * * 1-5"
-    - cron: "7,22,37,52 4-9 * * 1-5"
-    - cron: "7 10 * * 1-5"
+    - cron: "47,52,57 3 * * 1-5"
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 4-9 * * 1-5"
+    - cron: "2 10 * * 1-5"
   workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
 
 jobs:
