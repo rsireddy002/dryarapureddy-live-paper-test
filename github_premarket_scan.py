@@ -71,6 +71,14 @@ CACHE_PATH = "sahi_zones_cache.json"
 PAPER_TRADES_PATH = "paper_trades.json"
 PAPER_QTY = 50  # flat quantity per symbol, same for every name (indices included)
 
+# End-of-day summary window (IST). The workflow runs every 5 minutes past
+# market close too (schedule margin), so this is a WINDOW rather than a
+# single exact minute -- several runs may land inside it, but the summary
+# is only actually sent once per day (state["last_eod_summary_date"] guards
+# against repeats).
+EOD_SUMMARY_START = "15:25"
+EOD_SUMMARY_END = "15:35"
+
 INTRADAY_N_BINS = 45
 MIN_PROMINENCE_PCT = 0.08
 MIN_BIN_DISTANCE = 2
@@ -233,6 +241,16 @@ SECTOR_MAP = {
 
 def now_ist():
     return datetime.now(IST)
+
+
+def in_time_window(now, start_str, end_str):
+    """True if `now` (a tz-aware datetime) falls within [start_str, end_str]
+    on the same calendar day, both given as 'HH:MM'."""
+    start_h, start_m = map(int, start_str.split(":"))
+    end_h, end_m = map(int, end_str.split(":"))
+    start = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+    end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+    return start <= now <= end
 
 
 def get_env(name, required=True):
@@ -588,6 +606,52 @@ def format_trade_message(events):
     return "\n".join(lines)
 
 
+def build_eod_summary(state, results_by_symbol, today_str):
+    """Realized PnL from everything closed today + mark-to-market unrealized
+    PnL on whatever is still open, priced off this run's fresh LTPs (a
+    position whose symbol has no fresh read this run -- e.g. a fetch
+    failure -- is counted as open but left out of the unrealized total,
+    and called out separately rather than silently priced at entry)."""
+    closed_today = [c for c in state["closed_trades"] if c["exit_time"][:10] == today_str]
+    realized_pnl = sum(c["pnl"] for c in closed_today)
+    wins = sum(1 for c in closed_today if c["pnl"] > 0)
+    losses = sum(1 for c in closed_today if c["pnl"] < 0)
+
+    open_positions = state["positions"]
+    unrealized_pnl = 0.0
+    priced, unpriced = 0, 0
+    for symbol, pos in open_positions.items():
+        r = results_by_symbol.get(symbol)
+        if r is None:
+            unpriced += 1
+            continue
+        ltp = r["ltp"]
+        if pos["side"] == "BUY":
+            pnl = (ltp - pos["entry_price"]) * pos["qty"]
+        else:
+            pnl = (pos["entry_price"] - ltp) * pos["qty"]
+        unrealized_pnl += pnl
+        priced += 1
+
+    net_pnl = realized_pnl + unrealized_pnl
+
+    ts = now_ist().strftime("%d %b %Y, %H:%M IST")
+    lines = [f"End-of-day summary -- {ts}", ""]
+    lines.append(f"Closed today: {len(closed_today)} trades ({wins} win / {losses} loss)")
+    lines.append(f"Realized PnL: {realized_pnl:+.2f}")
+    lines.append("")
+    if unpriced:
+        lines.append(f"Open positions: {len(open_positions)} ({priced} priced, {unpriced} no fresh price this run)")
+    else:
+        lines.append(f"Open positions: {len(open_positions)}")
+    lines.append(f"Unrealized PnL: {unrealized_pnl:+.2f}")
+    lines.append("")
+    lines.append(f"Net PnL today (realized + unrealized): {net_pnl:+.2f}")
+    lines.append("")
+    lines.append("Paper trading (test) -- fixed quantity, opposite-signal-flip exits. Not investment advice.")
+    return "\n".join(lines)
+
+
 def main():
     token = get_env("UPSTOX_ANALYTICAL_TOKEN")
     bot_token = get_env("TELEGRAM_BOT_TOKEN")
@@ -657,6 +721,19 @@ def main():
         send_telegram(trade_message, bot_token, chat_id)
     else:
         print("\nNo paper trades this run.")
+
+    # End-of-day summary: sent once per day, the first run that lands in the
+    # EOD_SUMMARY window. Priced off this run's fresh LTPs (`results`, the
+    # full classified universe), not just the top-25-by-RVOL report.
+    now = now_ist()
+    today_str = now.strftime("%Y-%m-%d")
+    if in_time_window(now, EOD_SUMMARY_START, EOD_SUMMARY_END) and state.get("last_eod_summary_date") != today_str:
+        results_by_symbol = {r["symbol"]: r for r in results}
+        summary = build_eod_summary(state, results_by_symbol, today_str)
+        print("\n" + summary)
+        send_telegram(summary, bot_token, chat_id)
+        state["last_eod_summary_date"] = today_str
+        _atomic_json_dump(PAPER_TRADES_PATH, state)
 
 
 if __name__ == "__main__":
