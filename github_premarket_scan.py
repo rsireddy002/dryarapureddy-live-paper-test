@@ -10,6 +10,24 @@ history), and sends a buy/sell screen straight to your phone via
 Telegram -- sector, trend, CVD direction, RVOL, and room to the nearest
 validated zone -- with zero manual steps once this is set up.
 
+PAPER TRADING (added): every run also evaluates the FULL classified
+universe (not just the top-25-by-RVOL names in the Telegram report) and
+maintains a simple paper-trading book in paper_trades.json:
+  - Opens a fixed-quantity (PAPER_QTY) paper position on any symbol whose
+    bias is BUY or SELL and that doesn't already have one open.
+  - Closes an open position only when that symbol's bias flips to the
+    exact opposite side (a BUY position closes on a SELL bias, and vice
+    versa) -- CAUTION/WATCH/NEUTRAL never opens or closes a position, so
+    a position keeps riding through those in-between reads.
+  - The full universe (not just the top-25 report) is evaluated for
+    open/close decisions each run, so a position isn't "orphaned" just
+    because its symbol later drops out of the top-25-by-RVOL list.
+  - A second Telegram message is sent only when a trade actually opens or
+    closes this run (the original scan message is unchanged).
+  - State is written the same crash-proof/atomic way as the zones cache
+    (temp file + os.replace), and the workflow commits it back to the
+    repo after each run so it survives across the ephemeral runners.
+
 Reads:
     UPSTOX_ANALYTICAL_TOKEN  -- same long-lived token github_precompute.py uses
     TELEGRAM_BOT_TOKEN       -- see setup notes at the bottom of this file
@@ -50,6 +68,8 @@ from zone_validation import cross_validated_zones
 
 IST = timezone(timedelta(hours=5, minutes=30))
 CACHE_PATH = "sahi_zones_cache.json"
+PAPER_TRADES_PATH = "paper_trades.json"
+PAPER_QTY = 50  # flat quantity per symbol, same for every name (indices included)
 
 INTRADAY_N_BINS = 45
 MIN_PROMINENCE_PCT = 0.08
@@ -448,6 +468,126 @@ def format_message(ranked):
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Paper trading: fixed-quantity, opposite-signal-flip exits.
+#
+# State file shape:
+#   {
+#     "positions": {
+#       "SYMBOL": {"side": "BUY"/"SELL", "qty": 50, "entry_price": 123.4,
+#                  "entry_time": "2026-09-30T09:35:00+05:30"},
+#       ...
+#     },
+#     "closed_trades": [
+#       {"symbol": "SYMBOL", "side": "BUY", "qty": 50, "entry_price": 123.4,
+#        "entry_time": "...", "exit_price": 125.0, "exit_time": "...",
+#        "pnl": 80.0, "pnl_pct": 1.3},
+#       ...
+#     ]
+#   }
+#
+# Only BUY and SELL bias ever open or close a position -- CAUTION/WATCH/
+# NEUTRAL (and a symbol simply not appearing this run, e.g. a fetch
+# failure) leave any existing position untouched, so a position rides
+# through in-between reads until the exact opposite signal appears.
+# ---------------------------------------------------------------------------
+def _atomic_json_dump(path, obj):
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp_path, path)
+
+
+def load_paper_state():
+    if not os.path.exists(PAPER_TRADES_PATH):
+        return {"positions": {}, "closed_trades": []}
+    try:
+        with open(PAPER_TRADES_PATH) as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"paper_trades.json unreadable ({e}) -- starting a fresh book.", file=sys.stderr)
+        return {"positions": {}, "closed_trades": []}
+    state.setdefault("positions", {})
+    state.setdefault("closed_trades", [])
+    return state
+
+
+def process_paper_trades(results, state, qty=PAPER_QTY):
+    """Mutates `state` in place (opens/closes positions against the FULL
+    classified universe, not just the top-25-by-RVOL report) and returns
+    a list of trade events for this run (for the Telegram confirm
+    message) -- empty if nothing opened or closed."""
+    by_symbol = {r["symbol"]: r for r in results}
+    events = []
+    ts = now_ist().isoformat()
+
+    # Closes first: check every currently-open position against this run's
+    # bias for that symbol.
+    for symbol, pos in list(state["positions"].items()):
+        r = by_symbol.get(symbol)
+        if r is None:
+            continue  # no fresh read this run (fetch failed) -- keep holding
+        opposite = "SELL" if pos["side"] == "BUY" else "BUY"
+        if r["bias"] != opposite:
+            continue  # not the exact opposite signal -- keep holding
+        exit_price = r["ltp"]
+        if pos["side"] == "BUY":
+            pnl = (exit_price - pos["entry_price"]) * pos["qty"]
+        else:
+            pnl = (pos["entry_price"] - exit_price) * pos["qty"]
+        pnl_pct = pnl / (pos["entry_price"] * pos["qty"]) * 100 if pos["entry_price"] else 0.0
+        closed = {
+            "symbol": symbol, "side": pos["side"], "qty": pos["qty"],
+            "entry_price": pos["entry_price"], "entry_time": pos["entry_time"],
+            "exit_price": exit_price, "exit_time": ts,
+            "pnl": pnl, "pnl_pct": pnl_pct,
+        }
+        state["closed_trades"].append(closed)
+        del state["positions"][symbol]
+        events.append({"action": "CLOSE", **closed})
+
+    # Opens: any BUY/SELL bias symbol without an existing open position.
+    for symbol, r in by_symbol.items():
+        if r["bias"] not in ("BUY", "SELL"):
+            continue
+        if symbol in state["positions"]:
+            continue
+        pos = {
+            "side": r["bias"], "qty": qty,
+            "entry_price": r["ltp"], "entry_time": ts,
+        }
+        state["positions"][symbol] = pos
+        events.append({"action": "OPEN", "symbol": symbol, **pos})
+
+    return events
+
+
+def format_trade_message(events):
+    ts = now_ist().strftime("%d %b %Y, %H:%M IST")
+    lines = [f"Paper trades -- {ts}", ""]
+    opens = [e for e in events if e["action"] == "OPEN"]
+    closes = [e for e in events if e["action"] == "CLOSE"]
+
+    if opens:
+        lines.append("Opened:")
+        for e in opens:
+            lines.append(f"  {e['side']} {e['symbol']} x{e['qty']} @ {e['entry_price']:.2f}")
+        lines.append("")
+
+    if closes:
+        lines.append("Closed:")
+        for e in closes:
+            sign = "+" if e["pnl"] >= 0 else ""
+            lines.append(
+                f"  {e['side']} {e['symbol']} x{e['qty']} @ {e['entry_price']:.2f} -> "
+                f"{e['exit_price']:.2f} | PnL: {sign}{e['pnl']:.2f} ({sign}{e['pnl_pct']:.2f}%)"
+            )
+        lines.append("")
+
+    lines.append("Paper trading (test) -- fixed quantity, opposite-signal-flip exits. Not investment advice.")
+    return "\n".join(lines)
+
+
 def main():
     token = get_env("UPSTOX_ANALYTICAL_TOKEN")
     bot_token = get_env("TELEGRAM_BOT_TOKEN")
@@ -504,6 +644,20 @@ def main():
     print("\n" + message)
     send_telegram(message, bot_token, chat_id)
 
+    # Paper trading: evaluate the FULL classified universe (`results`), not
+    # just `top`, so a position doesn't get orphaned if its symbol later
+    # drops out of the top-25-by-RVOL report.
+    state = load_paper_state()
+    events = process_paper_trades(results, state, qty=PAPER_QTY)
+    _atomic_json_dump(PAPER_TRADES_PATH, state)
+    if events:
+        print(f"\nPaper trades this run: {len(events)}")
+        trade_message = format_trade_message(events)
+        print("\n" + trade_message)
+        send_telegram(trade_message, bot_token, chat_id)
+    else:
+        print("\nNo paper trades this run.")
+
 
 if __name__ == "__main__":
     main()
@@ -532,4 +686,8 @@ if __name__ == "__main__":
 #
 # 4. Add this file (github_premarket_scan.py) and the accompanying
 #    workflow (.github/workflows/premarket-scan.yml) to the repo root.
+#
+# 5. paper_trades.json starts out absent -- the first run creates it and
+#    the workflow's "Commit and push" step commits it. No manual setup
+#    needed for the paper-trading book itself.
 # ---------------------------------------------------------------------------
