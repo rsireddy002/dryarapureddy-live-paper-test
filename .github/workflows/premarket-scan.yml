@@ -4,21 +4,10 @@ permissions:
   contents: write
 
 on:
-  schedule:
-    # Every 5 minutes, offset 2 minutes off the round clock marks, covering
-    # market hours with margin: 03:00-10:59 UTC = 08:30-16:29 IST.
-    # Single plain cron line (no multiple entries, no comma lists) to match
-    # the exact style of scheduled-precompute.yml, which IS firing reliably
-    # on schedule in this same repo.
-    #
-    # NOTE: this schedule trigger has proven unreliable in dryarapureddy-live
-    # (zero "Scheduled" firings across two full trading days despite a clean
-    # YAML file) -- the primary trigger there is now an external cron-job.org
-    # job calling this workflow's workflow_dispatch endpoint directly every 5
-    # minutes. Keep this schedule as a redundant fallback regardless.
-    - cron: "2-59/5 3-10 * * 1-5"
-  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab,
-                         # and is what the external cron-job.org job calls
+  # Manual-only for this test repo -- no schedule trigger, so nothing runs
+  # unattended and races with a manual test run. (The live repo is the one
+  # with the real 5-minute schedule + external cron-job.org trigger.)
+  workflow_dispatch: {}
 
 jobs:
   scan:
