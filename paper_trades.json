@@ -6,12 +6,6 @@
       "entry_price": 1879.6,
       "entry_time": "2026-09-30T15:29:13.193420+05:30"
     },
-    "LT": {
-      "side": "SELL",
-      "qty": 50,
-      "entry_price": 3733.0,
-      "entry_time": "2026-09-30T15:29:13.193420+05:30"
-    },
     "TCS": {
       "side": "SELL",
       "qty": 50,
@@ -833,7 +827,85 @@
       "qty": 50,
       "entry_price": 2337.0,
       "entry_time": "2026-09-30T15:29:13.193420+05:30"
+    },
+    "INFY": {
+      "side": "SELL",
+      "qty": 50,
+      "entry_price": 994.1,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "SBIN": {
+      "side": "SELL",
+      "qty": 50,
+      "entry_price": 959.5,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "LT": {
+      "side": "BUY",
+      "qty": 50,
+      "entry_price": 3760.0,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "MOTHERSON": {
+      "side": "BUY",
+      "qty": 50,
+      "entry_price": 163.26,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "LODHA": {
+      "side": "BUY",
+      "qty": 50,
+      "entry_price": 1135.0,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "UNIONBANK": {
+      "side": "BUY",
+      "qty": 50,
+      "entry_price": 171.0,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "BANKINDIA": {
+      "side": "SELL",
+      "qty": 50,
+      "entry_price": 130.24,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "CHAMBLFERT": {
+      "side": "SELL",
+      "qty": 50,
+      "entry_price": 408.95,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "HUDCO": {
+      "side": "SELL",
+      "qty": 50,
+      "entry_price": 166.0,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "NCC": {
+      "side": "SELL",
+      "qty": 50,
+      "entry_price": 128.35,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
+    },
+    "PFIZER": {
+      "side": "SELL",
+      "qty": 50,
+      "entry_price": 3875.0,
+      "entry_time": "2026-09-30T16:08:08.291806+05:30"
     }
   },
-  "closed_trades": []
+  "closed_trades": [
+    {
+      "symbol": "LT",
+      "side": "SELL",
+      "qty": 50,
+      "entry_price": 3733.0,
+      "entry_time": "2026-09-30T15:29:13.193420+05:30",
+      "exit_price": 3760.0,
+      "exit_time": "2026-09-30T16:08:08.291806+05:30",
+      "pnl": -1350.0,
+      "pnl_pct": -0.7232788641843022
+    }
+  ]
 }
