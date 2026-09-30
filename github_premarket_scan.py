@@ -76,8 +76,8 @@ PAPER_QTY = 50  # flat quantity per symbol, same for every name (indices include
 # single exact minute -- several runs may land inside it, but the summary
 # is only actually sent once per day (state["last_eod_summary_date"] guards
 # against repeats).
-EOD_SUMMARY_START = "00:00"
-EOD_SUMMARY_END = "23:59"
+EOD_SUMMARY_START = "15:25"
+EOD_SUMMARY_END = "15:35"
 
 INTRADAY_N_BINS = 45
 MIN_PROMINENCE_PCT = 0.08
